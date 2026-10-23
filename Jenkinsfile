@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -18,8 +19,14 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
+                    echo "Creating Python virtual environment..."
                     python3 -m venv .venv
+
+                    echo "Upgrading pip..."
                     .venv/bin/python -m pip install --upgrade pip
+
+                    echo "Installing application dependencies..."
                     .venv/bin/python -m pip install -r requirements.txt
                 '''
             }
@@ -29,13 +36,21 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
+                    echo "Checking MongoDB connectivity..."
                     python3 -c "import socket; s=socket.create_connection(('127.0.0.1',27017),timeout=3); s.close()"
+
+                    echo "Running Flask application tests..."
                     .venv/bin/python -m pytest -v --junitxml=test-results.xml
                 '''
             }
+
             post {
                 always {
-                    junit testResults: 'test-results.xml', allowEmptyResults: true
+                    junit(
+                        testResults: 'test-results.xml',
+                        allowEmptyResults: true
+                    )
                 }
             }
         }
@@ -48,50 +63,21 @@ pipeline {
                     env.GIT_BRANCH == 'refs/remotes/origin/main'
                 }
             }
+
             steps {
                 sh '''
                     set -eu
 
-                    if [ -f staging.pid ]; then
-                        old_pid=$(cat staging.pid)
-                        if kill -0 "$old_pid" 2>/dev/null; then
-                            kill "$old_pid" || true
-                            for i in $(seq 1 10); do
-                                kill -0 "$old_pid" 2>/dev/null || break
-                                sleep 1
-                            done
-                        fi
-                        rm -f staging.pid
-                    fi
+                    echo "Deploying Flask application to staging..."
+                    sudo -n /usr/local/sbin/deploy-flask-staging
 
-                    MONGO_URI='mongodb://127.0.0.1:27017/flask_staging_db' \
-                    SECRET_KEY='jenkins-local-staging-key' \
-                    nohup .venv/bin/python -c \
-                      "from app import app; app.run(host='127.0.0.1', port=5001, debug=False)" \
-                      > staging.log 2>&1 < /dev/null &
-
-                    echo $! > staging.pid
-
-                    ready=0
-                    for i in $(seq 1 30); do
-                        if curl --silent --fail http://127.0.0.1:5001/ >/dev/null; then
-                            ready=1
-                            break
-                        fi
-                        sleep 2
-                    done
-
-                    if [ "$ready" -ne 1 ]; then
-                        echo "Staging application did not become ready."
-                        cat staging.log
-                        exit 1
-                    fi
-
-                    echo "Staging deployment is responding on port 5001."
+                    echo "Verifying staging endpoint..."
                     curl --silent --show-error --fail \
-                      --output /dev/null \
-                      --write-out 'HTTP status: %{http_code}\\n' \
-                      http://127.0.0.1:5001/
+                        --output /dev/null \
+                        --write-out 'HTTP status: %{http_code}\\n' \
+                        http://127.0.0.1:5001/
+
+                    echo "Staging deployment verified."
                 '''
             }
         }
@@ -99,11 +85,13 @@ pipeline {
 
     post {
         success {
-            echo 'Build, tests, and applicable deployment stages succeeded.'
+            echo 'SUCCESS: Build, tests, and applicable deployment stages passed.'
         }
+
         failure {
-            echo 'Pipeline failed. Review the stage logs and test reports.'
+            echo 'FAILURE: Review the failed stage and Console Output.'
         }
+
         always {
             echo "Pipeline completed with status: ${currentBuild.currentResult}"
         }
